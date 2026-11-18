@@ -1,0 +1,54 @@
+name: Python prepare release
+description: >-
+  Bumps the version by commitizen (the project's cz.toml) on a branch
+  release/v<next>: pyproject.toml, uv.lock and CHANGELOG.md in one commit,
+  no tag. Then opens the PR into the default branch; merging it is the
+  release (python/release).
+
+inputs:
+  increment:
+    description: MAJOR, MINOR or PATCH; empty takes it from the commits since the last tag.
+    default: ""
+  github-token:
+    description: Pushes the branch and opens the PR; needs contents and pull-requests write.
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: The version the PR releases.
+    value: ${{ steps.bump.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+
+    - id: bump
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        INCREMENT: ${{ inputs.increment }}
+        BASE: ${{ github.event.repository.default_branch }}
+      run: |
+        # commitizen reads the whole history and the tags, whatever the checkout fetched.
+        git fetch --quiet --tags --unshallow 2> /dev/null || git fetch --quiet --tags
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+        git switch --quiet -c release/next
+        args=(--yes --changelog)
+        if [ -n "$INCREMENT" ]; then args+=(--increment "$INCREMENT"); fi
+        uvx --from 'commitizen>=4,<5' cz bump "${args[@]}"
+
+        version=$(uv version --short)
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        # The tag is python/release's to make, on the merge commit in the default branch.
+        git tag -d "v$version"
+        git branch -m "release/v$version"
+        git push --quiet origin "release/v$version"
+
+        notes=$(awk -v v="$version" '
+          /^## / { if (found) exit; if ($2 == v || $2 == "v" v) { found = 1; next } }
+          found' CHANGELOG.md)
+        gh pr create --base "$BASE" --head "release/v$version" \
+          --title "bump: v$version" --body "${notes:-Release v$version.}"

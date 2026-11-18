@@ -1,0 +1,58 @@
+name: Python release
+description: >-
+  Releases the version in pyproject.toml once. When the tag v<version> does
+  not exist yet, it builds the package, publishes it to PyPI by Trusted
+  Publishing and creates the GitHub release, whose tag lands on the commit
+  being built. When the tag exists, it does nothing.
+
+inputs:
+  github-token:
+    description: Creates the tag and the release; needs contents write.
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: The version in pyproject.toml.
+    value: ${{ steps.version.outputs.version }}
+  released:
+    description: true when this run released it.
+    value: ${{ steps.version.outputs.new }}
+
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+
+    - id: version
+      shell: bash
+      run: |
+        version=$(uv version --short)
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        if git ls-remote --exit-code --tags origin "refs/tags/v$version" > /dev/null; then
+          echo "v$version is released already"
+          echo "new=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "new=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - if: steps.version.outputs.new == 'true'
+      shell: bash
+      run: uv build
+
+    # A rerun after a failed release step finds the files on PyPI and skips them.
+    - if: steps.version.outputs.new == 'true'
+      shell: bash
+      run: uv publish --trusted-publishing always --check-url https://pypi.org/simple/
+
+    - if: steps.version.outputs.new == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        VERSION: ${{ steps.version.outputs.version }}
+      run: |
+        # The version's own section of CHANGELOG.md; GitHub's notes without one.
+        notes=$(awk -v v="$VERSION" '
+          /^## / { if (found) exit; if ($2 == v || $2 == "v" v) { found = 1; next } }
+          found' CHANGELOG.md 2> /dev/null || true)
+        if [ -n "$notes" ]; then args=(--notes "$notes"); else args=(--generate-notes); fi
+        gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "v$VERSION" "${args[@]}"
